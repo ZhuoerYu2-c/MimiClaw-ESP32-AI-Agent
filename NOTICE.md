@@ -1,18 +1,11 @@
 # Notice
 
-This repository is a cleaned and republished copy of the MIT-licensed MimiClaw project for ESP32-S3 embedded AI assistant development.
+This repository contains an extended and customized implementation based on the MIT-licensed MimiClaw project:
 
-- Original project: https://github.com/memovai/mimiclaw
+- Upstream project: https://github.com/memovai/mimiclaw
 - Original author and copyright holder: Ziboyan Wang
 - Original license: MIT License, preserved in `LICENSE`
 
-The original README states that MimiClaw is inspired by OpenClaw and Nanobot:
+The extensions published in this repository include an ST7789 status-display subsystem, lifecycle display integration, MiniMax API adaptation, stricter tool-execution rules, hardware diagnostic CLI commands, and PSRAM-oriented Feishu memory optimization.
 
-- OpenClaw: https://github.com/openclaw/openclaw
-- Nanobot: https://github.com/HKUDS/nanobot
-
-Local publication notes:
-
-- Build outputs, managed ESP-IDF components, local `sdkconfig`, binaries and private secrets were removed.
-- `main/mimi_secrets.h` is intentionally not included. Use `main/mimi_secrets.h.example` as the template for local credentials.
-- The original copyright notice is retained.
+Private credentials, local build output, binaries, managed ESP-IDF components, and machine-specific configuration are intentionally excluded.

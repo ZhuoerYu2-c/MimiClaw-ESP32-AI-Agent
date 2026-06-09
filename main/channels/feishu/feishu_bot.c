@@ -8,12 +8,14 @@
 #include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "esp_websocket_client.h"
 #include "esp_crt_bundle.h"
 #include "esp_timer.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "nvs.h"
 #include "cJSON.h"
 
@@ -79,6 +81,24 @@ typedef struct {
     size_t cap;
 } http_resp_t;
 
+static void *prefer_psram_malloc(size_t size)
+{
+    void *buf = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return buf ? buf : malloc(size);
+}
+
+static void *prefer_psram_calloc(size_t n, size_t size)
+{
+    void *buf = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return buf ? buf : calloc(n, size);
+}
+
+static void *prefer_psram_realloc(void *ptr, size_t size)
+{
+    void *buf = heap_caps_realloc(ptr, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return buf ? buf : realloc(ptr, size);
+}
+
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 {
     http_resp_t *resp = (http_resp_t *)evt->user_data;
@@ -88,7 +108,7 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
             if (new_cap < resp->len + evt->data_len + 1) {
                 new_cap = resp->len + evt->data_len + 1;
             }
-            char *tmp = realloc(resp->buf, new_cap);
+            char *tmp = prefer_psram_realloc(resp->buf, new_cap);
             if (!tmp) return ESP_ERR_NO_MEM;
             resp->buf = tmp;
             resp->cap = new_cap;
@@ -317,7 +337,7 @@ static esp_err_t feishu_get_tenant_token(void)
     cJSON_Delete(body);
     if (!json_str) return ESP_ERR_NO_MEM;
 
-    http_resp_t resp = { .buf = calloc(1, 2048), .len = 0, .cap = 2048 };
+    http_resp_t resp = { .buf = prefer_psram_calloc(1, 2048), .len = 0, .cap = 2048 };
     if (!resp.buf) { free(json_str); return ESP_ERR_NO_MEM; }
 
     esp_http_client_config_t config = {
@@ -377,7 +397,7 @@ static char *feishu_api_call(const char *url, const char *method, const char *po
 {
     if (feishu_get_tenant_token() != ESP_OK) return NULL;
 
-    http_resp_t resp = { .buf = calloc(1, 4096), .len = 0, .cap = 4096 };
+    http_resp_t resp = { .buf = prefer_psram_calloc(1, 4096), .len = 0, .cap = 4096 };
     if (!resp.buf) return NULL;
 
     esp_http_client_config_t config = {
@@ -451,7 +471,7 @@ static esp_err_t feishu_pull_ws_config(void)
     cJSON_Delete(body);
     if (!json_str) return ESP_ERR_NO_MEM;
 
-    http_resp_t resp = { .buf = calloc(1, 4096), .len = 0, .cap = 4096 };
+    http_resp_t resp = { .buf = prefer_psram_calloc(1, 4096), .len = 0, .cap = 4096 };
     if (!resp.buf) {
         free(json_str);
         return ESP_ERR_NO_MEM;
@@ -589,7 +609,7 @@ static void feishu_ws_event_handler(void *arg, esp_event_base_t base, int32_t ev
         if (e->payload_offset == 0) {
             if (rx_buf) free(rx_buf);
             rx_cap = (e->payload_len > need) ? e->payload_len : need;
-            rx_buf = malloc(rx_cap);
+            rx_buf = prefer_psram_malloc(rx_cap);
             if (!rx_buf) return;
         } else if (!rx_buf || need > rx_cap) {
             return;
@@ -826,14 +846,25 @@ esp_err_t feishu_bot_start(void)
         ESP_LOGW(TAG, "Feishu WebSocket task already running");
         return ESP_OK;
     }
-    BaseType_t ok = xTaskCreatePinnedToCore(
+    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(
         feishu_ws_task,
         "feishu_ws",
         MIMI_FEISHU_POLL_STACK,
         NULL,
         MIMI_FEISHU_POLL_PRIO,
         &s_ws_task,
-        MIMI_FEISHU_POLL_CORE);
+        MIMI_FEISHU_POLL_CORE,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ok != pdPASS) {
+        ok = xTaskCreatePinnedToCore(
+            feishu_ws_task,
+            "feishu_ws",
+            MIMI_FEISHU_POLL_STACK,
+            NULL,
+            MIMI_FEISHU_POLL_PRIO,
+            &s_ws_task,
+            MIMI_FEISHU_POLL_CORE);
+    }
     if (ok != pdPASS) {
         s_ws_task = NULL;
         return ESP_FAIL;

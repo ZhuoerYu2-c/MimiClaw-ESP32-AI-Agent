@@ -25,6 +25,7 @@
 #include "cron/cron_service.h"
 #include "heartbeat/heartbeat.h"
 #include "skills/skill_loader.h"
+#include "display/oled_display.h"
 #include "onboard/wifi_onboard.h"
 
 static const char *TAG = "mimi";
@@ -77,23 +78,31 @@ static void outbound_dispatch_task(void *arg)
             esp_err_t send_err = telegram_send_message(msg.chat_id, msg.content);
             if (send_err != ESP_OK) {
                 ESP_LOGE(TAG, "Telegram send failed for %s: %s", msg.chat_id, esp_err_to_name(send_err));
+                oled_display_show(OLED_FACE_SAD, "TELEGRAM", "send failed");
             } else {
                 ESP_LOGI(TAG, "Telegram send success for %s (%d bytes)", msg.chat_id, (int)strlen(msg.content));
+                oled_display_show_preview(OLED_FACE_HAPPY, "TELEGRAM", msg.content);
             }
         } else if (strcmp(msg.channel, MIMI_CHAN_FEISHU) == 0) {
             esp_err_t send_err = feishu_send_message(msg.chat_id, msg.content);
             if (send_err != ESP_OK) {
                 ESP_LOGE(TAG, "Feishu send failed for %s: %s", msg.chat_id, esp_err_to_name(send_err));
+                oled_display_show(OLED_FACE_SAD, "FEISHU", "send failed");
             } else {
                 ESP_LOGI(TAG, "Feishu send success for %s (%d bytes)", msg.chat_id, (int)strlen(msg.content));
+                oled_display_show_preview(OLED_FACE_HAPPY, "FEISHU", msg.content);
             }
         } else if (strcmp(msg.channel, MIMI_CHAN_WEBSOCKET) == 0) {
             esp_err_t ws_err = ws_server_send(msg.chat_id, msg.content);
             if (ws_err != ESP_OK) {
                 ESP_LOGW(TAG, "WS send failed for %s: %s", msg.chat_id, esp_err_to_name(ws_err));
+                oled_display_show(OLED_FACE_SAD, "WEBSOCKET", "send failed");
+            } else {
+                oled_display_show_preview(OLED_FACE_HAPPY, "WEBSOCKET", msg.content);
             }
         } else if (strcmp(msg.channel, MIMI_CHAN_SYSTEM) == 0) {
             ESP_LOGI(TAG, "System message [%s]: %.128s", msg.chat_id, msg.content);
+            oled_display_show_preview(OLED_FACE_IDLE, "SYSTEM", msg.content);
         } else {
             ESP_LOGW(TAG, "Unknown channel: %s", msg.channel);
         }
@@ -120,7 +129,11 @@ void app_main(void)
     /* Phase 1: Core infrastructure */
     ESP_ERROR_CHECK(init_nvs());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+    if (oled_display_init() == ESP_OK) {
+        oled_display_show(OLED_FACE_BOOT, "LCD TEST", "ST7789 ready");
+    }
     ESP_ERROR_CHECK(init_spiffs());
+    oled_display_show(OLED_FACE_BOOT, "BOOT", "loading services");
 
     /* Initialize subsystems */
     ESP_ERROR_CHECK(message_bus_init());
@@ -150,15 +163,19 @@ void app_main(void)
         if (wifi_manager_wait_connected(30000) == ESP_OK) {
             wifi_ok = true;
             ESP_LOGI(TAG, "WiFi connected: %s", wifi_manager_get_ip());
+            oled_display_show(OLED_FACE_WIFI, "WIFI OK", wifi_manager_get_ip());
         } else {
             ESP_LOGW(TAG, "WiFi connection timeout");
+            oled_display_show(OLED_FACE_SAD, "WIFI", "connect timeout");
         }
     } else {
         ESP_LOGW(TAG, "No WiFi credentials configured");
+        oled_display_show(OLED_FACE_SAD, "WIFI", "no credentials");
     }
 
     if (!wifi_ok) {
         ESP_LOGW(TAG, "Entering WiFi onboarding mode...");
+        oled_display_show(OLED_FACE_BOOT, "WIFI SETUP", "connect hotspot");
         wifi_onboard_start(WIFI_ONBOARD_MODE_CAPTIVE);  /* blocks, restarts on success */
         return;  /* unreachable */
     }
@@ -184,6 +201,7 @@ void app_main(void)
         ESP_ERROR_CHECK(ws_server_start());
 
         ESP_LOGI(TAG, "All services started!");
+        oled_display_show(OLED_FACE_HAPPY, "READY", "LCD test pass");
     }
 
     ESP_LOGI(TAG, "MimiClaw ready. Type 'help' for CLI commands.");

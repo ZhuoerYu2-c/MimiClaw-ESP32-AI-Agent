@@ -120,6 +120,26 @@
 /* GPIO */
 #define MIMI_GPIO_CONFIG_SECTION     1   /* enable GPIO tools */
 
+/* Display / 1.54-inch ST7789 SPI LCD.
+ * Keep the MIMI_OLED_ENABLE name because the public display API is still
+ * oled_display_* for now. */
+#define MIMI_OLED_ENABLE             1
+#define MIMI_LCD_WIDTH               240
+#define MIMI_LCD_HEIGHT              240
+#define MIMI_LCD_PIXEL_CLOCK_HZ      (20 * 1000 * 1000)
+#define MIMI_LCD_SPI_MODE            0
+#define MIMI_LCD_SPI_SCLK            21
+#define MIMI_LCD_SPI_MOSI            47
+#define MIMI_LCD_RST                 45
+#define MIMI_LCD_DC                  40
+#define MIMI_LCD_CS                  41
+#define MIMI_LCD_BL                  42
+#define MIMI_LCD_X_GAP               0
+#define MIMI_LCD_Y_GAP               0
+#define MIMI_LCD_MIRROR_X            0
+#define MIMI_LCD_MIRROR_Y            0
+#define MIMI_LCD_SWAP_XY             0
+
 /* Skills */
 #define MIMI_SKILLS_PREFIX           MIMI_SPIFFS_BASE "/skills/"
 

@@ -5,6 +5,7 @@
 #include "llm/llm_proxy.h"
 #include "memory/session_mgr.h"
 #include "tools/tool_registry.h"
+#include "display/oled_display.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -191,6 +192,7 @@ static void agent_loop_task(void *arg)
         if (err != ESP_OK) continue;
 
         ESP_LOGI(TAG, "Processing message from %s:%s", msg.channel, msg.chat_id);
+        oled_display_show_preview(OLED_FACE_BUSY, msg.channel, msg.content);
 
         /* 1. Build system prompt */
         context_build_system_prompt(system_prompt, MIMI_CONTEXT_BUF_SIZE);
@@ -239,6 +241,7 @@ static void agent_loop_task(void *arg)
 
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "LLM call failed: %s", esp_err_to_name(err));
+                oled_display_show(OLED_FACE_SAD, "LLM ERROR", "check serial log");
                 break;
             }
 

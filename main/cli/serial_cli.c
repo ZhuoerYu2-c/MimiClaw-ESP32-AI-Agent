@@ -12,6 +12,7 @@
 #include "cron/cron_service.h"
 #include "heartbeat/heartbeat.h"
 #include "skills/skill_loader.h"
+#include "display/oled_display.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -21,6 +22,9 @@
 #include "esp_console.h"
 #include "esp_system.h"
 #include "esp_heap_caps.h"
+#include "esp_rom_sys.h"
+#include "driver/gpio.h"
+#include "driver/i2c_master.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "argtable3/argtable3.h"
@@ -327,6 +331,294 @@ static int cmd_wifi_scan(int argc, char **argv)
     (void)argv;
     wifi_manager_scan_and_print();
     return 0;
+}
+
+/* --- i2c_scan command --- */
+static struct {
+    struct arg_int *sda;
+    struct arg_int *scl;
+    struct arg_end *end;
+} i2c_scan_args;
+
+static struct {
+    struct arg_int *sda;
+    struct arg_int *scl;
+    struct arg_end *end;
+} i2c_diag_args;
+
+static bool cli_i2c_pin_is_valid(int pin)
+{
+    if (pin < 0 || pin == 19 || pin == 20) {
+        return false;
+    }
+    return GPIO_IS_VALID_GPIO((gpio_num_t)pin);
+}
+
+static int cmd_i2c_scan(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&i2c_scan_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, i2c_scan_args.end, argv[0]);
+        return 1;
+    }
+
+    int sda = i2c_scan_args.sda->ival[0];
+    int scl = i2c_scan_args.scl->ival[0];
+    if (!cli_i2c_pin_is_valid(sda) || !cli_i2c_pin_is_valid(scl) || sda == scl) {
+        printf("Invalid I2C pins. Avoid GPIO19/20 and use two valid different GPIOs.\n");
+        return 1;
+    }
+
+    i2c_master_bus_handle_t bus = NULL;
+    i2c_master_bus_config_t bus_cfg = {
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .i2c_port = -1,
+        .sda_io_num = sda,
+        .scl_io_num = scl,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = 1,
+    };
+
+    esp_err_t err = i2c_new_master_bus(&bus_cfg, &bus);
+    if (err != ESP_OK) {
+        printf("I2C bus create failed on SDA=%d SCL=%d: %s\n", sda, scl, esp_err_to_name(err));
+        return 1;
+    }
+
+    int found = 0;
+    printf("Scanning I2C on SDA=%d SCL=%d...\n", sda, scl);
+    for (uint8_t addr = 0x03; addr <= 0x77; ++addr) {
+        err = i2c_master_probe(bus, addr, 20);
+        if (err == ESP_OK) {
+            printf("  found 0x%02x\n", addr);
+            found++;
+        }
+    }
+
+    i2c_del_master_bus(bus);
+    if (found == 0) {
+        printf("No I2C devices found on SDA=%d SCL=%d.\n", sda, scl);
+    } else {
+        printf("Found %d I2C device(s).\n", found);
+    }
+    return found > 0 ? 0 : 1;
+}
+
+static void cli_i2c_release_pins(int sda, int scl)
+{
+    gpio_reset_pin((gpio_num_t)sda);
+    gpio_reset_pin((gpio_num_t)scl);
+}
+
+static int cmd_i2c_diag(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&i2c_diag_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, i2c_diag_args.end, argv[0]);
+        return 1;
+    }
+
+    int sda = i2c_diag_args.sda->ival[0];
+    int scl = i2c_diag_args.scl->ival[0];
+    if (!cli_i2c_pin_is_valid(sda) || !cli_i2c_pin_is_valid(scl) || sda == scl) {
+        printf("Invalid I2C pins. Avoid GPIO19/20 and use two valid different GPIOs.\n");
+        return 1;
+    }
+
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << sda) | (1ULL << scl),
+        .mode = GPIO_MODE_INPUT_OUTPUT_OD,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&cfg));
+    gpio_set_level((gpio_num_t)sda, 1);
+    gpio_set_level((gpio_num_t)scl, 1);
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    printf("I2C diag SDA=%d SCL=%d\n", sda, scl);
+    printf("  idle before recovery: SDA=%d SCL=%d\n",
+           gpio_get_level((gpio_num_t)sda), gpio_get_level((gpio_num_t)scl));
+
+    for (int i = 0; i < 9; ++i) {
+        gpio_set_level((gpio_num_t)scl, 0);
+        esp_rom_delay_us(10);
+        gpio_set_level((gpio_num_t)scl, 1);
+        esp_rom_delay_us(10);
+    }
+
+    gpio_set_level((gpio_num_t)sda, 0);
+    esp_rom_delay_us(10);
+    gpio_set_level((gpio_num_t)scl, 1);
+    esp_rom_delay_us(10);
+    gpio_set_level((gpio_num_t)sda, 1);
+    esp_rom_delay_us(10);
+
+    int sda_after = gpio_get_level((gpio_num_t)sda);
+    int scl_after = gpio_get_level((gpio_num_t)scl);
+    printf("  idle after recovery:  SDA=%d SCL=%d\n", sda_after, scl_after);
+    if (sda_after == 0 || scl_after == 0) {
+        printf("  bus is stuck low; check short, pin mapping, power, or a device holding the line.\n");
+        cli_i2c_release_pins(sda, scl);
+        return 1;
+    }
+
+    cli_i2c_release_pins(sda, scl);
+    printf("  bus lines released high; run i2c_scan %d %d next.\n", sda, scl);
+    return 0;
+}
+
+/* --- pin_set / pin_read / pin_blink: physical GPIO verification --- */
+static struct {
+    struct arg_int *pin;
+    struct arg_int *level;
+    struct arg_end *end;
+} pin_set_args;
+
+static struct {
+    struct arg_int *pin;
+    struct arg_end *end;
+} pin_read_args;
+
+static struct {
+    struct arg_int *pin;
+    struct arg_int *seconds;
+    struct arg_end *end;
+} pin_blink_args;
+
+static int cmd_pin_set(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&pin_set_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, pin_set_args.end, argv[0]);
+        return 1;
+    }
+    int pin = pin_set_args.pin->ival[0];
+    int level = pin_set_args.level->ival[0];
+    if (!cli_i2c_pin_is_valid(pin)) {
+        printf("Invalid pin %d. Avoid GPIO19/20.\n", pin);
+        return 1;
+    }
+    if (level != 0 && level != 1) {
+        printf("Level must be 0 or 1.\n");
+        return 1;
+    }
+    gpio_reset_pin((gpio_num_t)pin);
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << pin),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    esp_err_t err = gpio_config(&cfg);
+    if (err != ESP_OK) {
+        printf("gpio_config failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    gpio_set_level((gpio_num_t)pin, level);
+    printf("GPIO%d driven %s. Measure with multimeter; pin stays put until pin_set is called again.\n",
+           pin, level ? "HIGH (~3.3V)" : "LOW (0V)");
+    return 0;
+}
+
+static int cmd_pin_read(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&pin_read_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, pin_read_args.end, argv[0]);
+        return 1;
+    }
+    int pin = pin_read_args.pin->ival[0];
+    if (!cli_i2c_pin_is_valid(pin)) {
+        printf("Invalid pin %d.\n", pin);
+        return 1;
+    }
+    gpio_reset_pin((gpio_num_t)pin);
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << pin),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&cfg));
+    int v = gpio_get_level((gpio_num_t)pin);
+    printf("GPIO%d input level (with internal pull-up): %d\n", pin, v);
+    return 0;
+}
+
+static int cmd_pin_blink(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&pin_blink_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, pin_blink_args.end, argv[0]);
+        return 1;
+    }
+    int pin = pin_blink_args.pin->ival[0];
+    int secs = pin_blink_args.seconds->count > 0 ? pin_blink_args.seconds->ival[0] : 10;
+    if (!cli_i2c_pin_is_valid(pin)) {
+        printf("Invalid pin %d.\n", pin);
+        return 1;
+    }
+    if (secs < 1) secs = 1;
+    if (secs > 60) secs = 60;
+
+    gpio_reset_pin((gpio_num_t)pin);
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << pin),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&cfg));
+
+    printf("Blinking GPIO%d at 1Hz for %d seconds. Probe with LED or multimeter.\n", pin, secs);
+    int level = 0;
+    for (int i = 0; i < secs * 2; ++i) {
+        gpio_set_level((gpio_num_t)pin, level);
+        printf("  GPIO%d = %d\n", pin, level);
+        level = !level;
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+    gpio_set_level((gpio_num_t)pin, 0);
+    printf("Done. GPIO%d left at 0.\n", pin);
+    return 0;
+}
+
+/* --- oled_force command: compatibility display re-init command --- */
+static struct {
+    struct arg_int *sda;
+    struct arg_int *scl;
+    struct arg_int *addr;
+    struct arg_end *end;
+} oled_force_args;
+
+static int cmd_oled_force(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&oled_force_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, oled_force_args.end, argv[0]);
+        return 1;
+    }
+    int sda = oled_force_args.sda->ival[0];
+    int scl = oled_force_args.scl->ival[0];
+    int addr = oled_force_args.addr->count > 0 ? oled_force_args.addr->ival[0] : 0;
+    if (addr != 0 && addr != 0x3C && addr != 0x3D) {
+        printf("addr must be 0x3C, 0x3D or 0 (auto). Got 0x%02x.\n", addr);
+        return 1;
+    }
+    printf("Reinitialising configured ST7789 LCD pins; legacy args were SDA=%d SCL=%d addr=%s...\n",
+           sda, scl, addr ? (addr == 0x3C ? "0x3C" : "0x3D") : "auto");
+    esp_err_t err = oled_display_force_init(sda, scl, addr);
+    if (err == ESP_OK) {
+        printf("OK. Display should now show BOOT / display online.\n");
+        return 0;
+    }
+    printf("Failed: %s\n", esp_err_to_name(err));
+    return 1;
 }
 
 /* --- skill_list command --- */
@@ -828,6 +1120,78 @@ esp_err_t serial_cli_init(void)
         .func = &cmd_wifi_scan,
     };
     esp_console_cmd_register(&wifi_scan_cmd);
+
+    /* i2c_scan */
+    i2c_scan_args.sda = arg_int1(NULL, NULL, "<sda>", "I2C SDA GPIO number");
+    i2c_scan_args.scl = arg_int1(NULL, NULL, "<scl>", "I2C SCL GPIO number");
+    i2c_scan_args.end = arg_end(2);
+    esp_console_cmd_t i2c_scan_cmd = {
+        .command = "i2c_scan",
+        .help = "Scan I2C addresses on selected pins: i2c_scan <sda> <scl>",
+        .func = &cmd_i2c_scan,
+        .argtable = &i2c_scan_args,
+    };
+    esp_console_cmd_register(&i2c_scan_cmd);
+
+    /* i2c_diag */
+    i2c_diag_args.sda = arg_int1(NULL, NULL, "<sda>", "I2C SDA GPIO number");
+    i2c_diag_args.scl = arg_int1(NULL, NULL, "<scl>", "I2C SCL GPIO number");
+    i2c_diag_args.end = arg_end(2);
+    esp_console_cmd_t i2c_diag_cmd = {
+        .command = "i2c_diag",
+        .help = "Probe SDA/SCL idle levels and run bus-recovery pulses: i2c_diag <sda> <scl>",
+        .func = &cmd_i2c_diag,
+        .argtable = &i2c_diag_args,
+    };
+    esp_console_cmd_register(&i2c_diag_cmd);
+
+    /* pin_set */
+    pin_set_args.pin = arg_int1(NULL, NULL, "<pin>", "GPIO number");
+    pin_set_args.level = arg_int1(NULL, NULL, "<0|1>", "Output level");
+    pin_set_args.end = arg_end(2);
+    esp_console_cmd_t pin_set_cmd = {
+        .command = "pin_set",
+        .help = "Drive a GPIO output high or low: pin_set <pin> <0|1>",
+        .func = &cmd_pin_set,
+        .argtable = &pin_set_args,
+    };
+    esp_console_cmd_register(&pin_set_cmd);
+
+    /* pin_read */
+    pin_read_args.pin = arg_int1(NULL, NULL, "<pin>", "GPIO number");
+    pin_read_args.end = arg_end(1);
+    esp_console_cmd_t pin_read_cmd = {
+        .command = "pin_read",
+        .help = "Read a GPIO input level (with internal pull-up): pin_read <pin>",
+        .func = &cmd_pin_read,
+        .argtable = &pin_read_args,
+    };
+    esp_console_cmd_register(&pin_read_cmd);
+
+    /* pin_blink */
+    pin_blink_args.pin = arg_int1(NULL, NULL, "<pin>", "GPIO number");
+    pin_blink_args.seconds = arg_int0(NULL, NULL, "[seconds]", "Duration (default 10)");
+    pin_blink_args.end = arg_end(2);
+    esp_console_cmd_t pin_blink_cmd = {
+        .command = "pin_blink",
+        .help = "Toggle a GPIO at 1Hz to verify wiring: pin_blink <pin> [seconds]",
+        .func = &cmd_pin_blink,
+        .argtable = &pin_blink_args,
+    };
+    esp_console_cmd_register(&pin_blink_cmd);
+
+    /* oled_force */
+    oled_force_args.sda = arg_int1(NULL, NULL, "<sda>", "SDA GPIO");
+    oled_force_args.scl = arg_int1(NULL, NULL, "<scl>", "SCL GPIO");
+    oled_force_args.addr = arg_int0(NULL, NULL, "[addr]", "0x3C, 0x3D or 0=auto");
+    oled_force_args.end = arg_end(3);
+    esp_console_cmd_t oled_force_cmd = {
+        .command = "oled_force",
+        .help = "Re-init the configured ST7789 LCD (legacy args ignored): oled_force <sda> <scl> [addr]",
+        .func = &cmd_oled_force,
+        .argtable = &oled_force_args,
+    };
+    esp_console_cmd_register(&oled_force_cmd);
 
     /* set_tg_token */
     tg_token_args.token = arg_str1(NULL, NULL, "<token>", "Telegram bot token");
